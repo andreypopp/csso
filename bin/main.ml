@@ -1,14 +1,13 @@
-let extract_css css filename =
-  match Ppxlib.Ast_io.read_binary filename with
-  | Error _ -> css
-  | Ok t -> (
-      match Ppxlib.Ast_io.get_ast t with
-      | Impl s -> Csso_ppx.find_css s css
-      | Intf _ -> css)
+let extract_stylesheet s filename =
+  if String.ends_with filename ~suffix:".css" then
+    Csso_ppx.Stylesheet.of_css filename s
+  else if String.ends_with filename ~suffix:".pp.ml" then
+    Csso_ppx.Stylesheet.of_ml filename s
+  else failwith "Expected .css or .pp.ml file"
 
 let () =
-  let css =
+  let stylesheet =
     Array.to_seq Sys.argv |> Seq.drop (* prog name *) 1
-    |> Seq.fold_left extract_css Csso_ppx.String_map.empty
+    |> Seq.fold_left extract_stylesheet Csso_ppx.Stylesheet.empty
   in
-  Csso_ppx.String_map.iter (fun _ -> print_endline) css
+  Csso_ppx.Stylesheet.output_css stdout stylesheet

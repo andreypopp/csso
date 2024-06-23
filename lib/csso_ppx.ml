@@ -234,20 +234,53 @@ let () =
     ~rules:[ extension_stri; extension_expr ]
     ~preprocess_impl:jsx_rewrite#structure ~impl
 
-module String_map = Map.Make (String)
+module Stylesheet = struct
+  module String_map = Map.Make (String)
 
-let find_css s css =
-  let get_string e =
-    match e.pexp_desc with
-    | Pexp_constant (Pconst_string (v, _, None)) -> v
-    | _ -> assert false
-  in
-  List.fold_left
-    (fun css item ->
-      match item with
-      | [%stri [@@@CSS [%e? k], [%e? v]]] ->
-          let k = get_string k in
-          let v = get_string v in
-          String_map.add k v css
-      | _ -> css)
-    css s
+  type t = string String_map.t
+
+  let empty = String_map.empty
+
+  let of_structure s css =
+    let get_string e =
+      match e.pexp_desc with
+      | Pexp_constant (Pconst_string (v, _, None)) -> v
+      | _ -> assert false
+    in
+    List.fold_left
+      (fun css item ->
+        match item with
+        | [%stri [@@@CSS [%e? k], [%e? v]]] ->
+            let k = get_string k in
+            let v = get_string v in
+            String_map.add k v css
+        | _ -> css)
+      css s
+
+  let of_ml filename css =
+    match Ppxlib.Ast_io.read_binary filename with
+    | Error _ -> css
+    | Ok t -> (
+        match Ppxlib.Ast_io.get_ast t with
+        | Impl s -> of_structure s css
+        | Intf _ -> (* no CSS in interfaces *) css)
+
+  let of_css filename css =
+    In_channel.with_open_bin filename @@ fun ic ->
+    let rec loop css =
+      match In_channel.input_line ic with
+      | None -> css
+      | Some v -> (
+          match String.index v ' ' with
+          | exception Not_found -> loop css
+          | i ->
+              let k = String.sub v 0 i in
+              loop (String_map.add k v css))
+    in
+    loop css
+
+  let output_css oc =
+    String_map.iter (fun _ v ->
+        output_string oc v;
+        output_char oc '\n')
+end
