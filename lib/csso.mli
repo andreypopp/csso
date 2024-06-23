@@ -1,10 +1,14 @@
 type style
 
 val empty : style
-val make_static : string -> class_name:string -> style
-val make_dynamic : string -> class_name:string -> value:string -> style
+
+external make :
+  < classes : < .. > Js.t ; style : < .. > Js.t ; className : string option >
+  Js.t ->
+  style = "%identity"
+
+external style : style -> ReactDOM.style = "style" [@@mel.get]
+external className : style -> string option = "className" [@@mel.get]
 val merge : style array -> style
-val to_class_name : style -> string option
-val to_inline_style : style -> ReactDOM.style
 
 include module type of Csso_value

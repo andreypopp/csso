@@ -8,7 +8,7 @@ module Spec : sig
   val dynamic : string -> expression -> t
   val to_class_name : t -> string
   val to_css : t -> string
-  val to_expression : loc:Location.t -> t -> expression
+  val to_expression : loc:Location.t -> t list -> expression
 end = struct
   type value = S of string | D of expression
   type t = { name : string; value : value }
@@ -25,18 +25,41 @@ end = struct
     sprintf ".%s { %s: %s; }" class_name spec.name
       (match spec.value with S v -> v | D _ -> "var(--" ^ spec.name ^ ")")
 
-  let to_expression ~loc spec =
-    let open Ast_builder.Default in
-    let class_name = to_class_name spec in
-    match spec.value with
-    | S _ ->
+  let to_expression ~loc = function
+    | [] -> [%expr Csso.empty]
+    | specs ->
+        let open Ast_builder.Default in
+        let classes, styles =
+          List.map
+            (fun spec ->
+              let class_name = to_class_name spec in
+              let classes =
+                ({ txt = Lident spec.name; loc }, estring ~loc class_name)
+              in
+              let styles =
+                let v =
+                  match spec.value with
+                  | S _ -> [%expr Js.Undefined.empty]
+                  | D v -> [%expr Js.Undefined.return [%e v]]
+                in
+                ({ txt = Lident ("--" ^ spec.name); loc }, [%expr [%e v]])
+              in
+              ((class_name, classes), styles))
+            specs
+          |> List.split
+        in
+        let class_names, classes = List.split classes in
+        let classes = pexp_record ~loc classes None in
+        let styles = pexp_record ~loc styles None in
+        let className = estring ~loc (String.concat " " class_names) in
         [%expr
-          Csso.make_static [%e estring ~loc spec.name]
-            ~class_name:[%e estring ~loc class_name]]
-    | D v ->
-        [%expr
-          Csso.make_dynamic [%e estring ~loc spec.name]
-            ~class_name:[%e estring ~loc class_name] ~value:[%e v]]
+          Csso.make
+            [%mel.obj
+              {
+                classes = [%mel.obj [%e classes]];
+                style = [%mel.obj [%e styles]];
+                className = Some [%e className];
+              }]]
 end
 
 module Specs : sig
@@ -94,14 +117,18 @@ end = struct
         Some spec
 end
 
-let compile_prop ~loc e =
-  match Specs.of_expression ~loc e with
-  | Some spec -> Spec.to_expression ~loc spec
-  | None -> e
-
 let compile_props ~loc es =
   let open Ast_builder.Default in
-  let es = List.map (compile_prop ~loc) es in
+  let rec go specs acc = function
+    | [] -> List.rev (compile_specs specs acc)
+    | e :: es -> (
+        match Specs.of_expression ~loc e with
+        | Some spec -> go (spec :: specs) acc es
+        | None -> go [] (e :: compile_specs specs acc) es)
+  and compile_specs specs acc =
+    match specs with [] -> acc | specs -> Spec.to_expression ~loc specs :: acc
+  in
+  let es = go [] [] es in
   [%expr
     let open Csso_value in
     let _ = height in
@@ -171,8 +198,8 @@ let jsx_rewrite =
         let make s tag args =
           [%expr
             let s = [%e s] in
-            let className = Csso.to_class_name s in
-            let style = Csso.to_inline_style s in
+            let className = Csso.className s in
+            let style = Csso.style s in
             [%e { expr with pexp_desc = Pexp_apply (tag, args) }]]
         in
         let extract_spec expr tag args =
