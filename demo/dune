@@ -1,0 +1,15 @@
+(melange.emit
+ (preprocess
+   (pps csso.ppx reason-react-ppx melange.ppx))
+ (libraries reason-react)
+ (target commonjs))
+
+(rule
+ (target main.css)
+ (mode promote)
+ (deps
+  (glob_files *.pp.ml))
+ (action
+  (with-stdout-to
+   %{target}
+   (run csso %{deps}))))

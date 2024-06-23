@@ -1,0 +1,4 @@
+(executable
+ (public_name csso)
+ (name main)
+ (libraries ppxlib csso_ppx))

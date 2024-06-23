@@ -1,0 +1,6 @@
+_opam
+_build
+node_modules
+package.json
+pnpm-lock.yaml
+.parrot.md

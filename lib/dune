@@ -1,0 +1,31 @@
+(library
+ (name csso_ppx)
+ (public_name csso.ppx)
+ (modules csso_ppx)
+ (preprocess
+  (pps ppxlib.metaquot))
+ (kind ppx_rewriter)
+ (ppx_runtime_libraries csso)
+ (libraries ppxlib csso_value))
+
+(library
+ (name csso)
+ (public_name csso)
+ (modules csso)
+ (modes melange)
+ (preprocess
+  (pps melange.ppx))
+ (libraries
+  reason-react
+  (re_export csso_value)))
+
+(library
+ (name csso_value)
+ (public_name csso.value)
+ (modes :standard melange)
+ (modules csso_value))
+
+(executable
+ (name csso_test)
+ (libraries csso.ppx)
+ (modules csso_test))

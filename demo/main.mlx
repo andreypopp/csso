@@ -1,0 +1,20 @@
+let%csso box =
+  flex_basis `auto;
+  width (`px 100)
+
+let square n = [%csso
+  height (`px n);
+  width (`px n)]
+
+module Page = struct
+  let make () =
+    <div csso=[ box; square 100 ]>
+      (React.string "hello!")
+    </div>
+    [@@react.component]
+end
+
+let () =
+  print_endline
+  @@ ReactDOMServer.renderToString
+  @@ <Page />
