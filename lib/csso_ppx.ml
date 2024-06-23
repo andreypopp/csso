@@ -102,10 +102,14 @@ let compile_prop ~loc e =
 let compile_props ~loc es =
   let open Ast_builder.Default in
   let es = List.map (compile_prop ~loc) es in
-  match es with
-  | [] -> [%expr Csso.empty]
-  | [ e ] -> e
-  | _ -> [%expr Csso.merge [%e elist ~loc es]]
+  [%expr
+    let open Csso_value in
+    let _ = height in
+    [%e
+      match es with
+      | [] -> [%expr Csso.empty]
+      | [ e ] -> e
+      | _ -> [%expr Csso.merge [%e elist ~loc es]]]]
 
 let extension_stri =
   let pattern =
