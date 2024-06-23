@@ -25,7 +25,7 @@ let make_dynamic name ~class_name ~value =
 let merge xs =
   let classes = Js.Dict.empty () in
   let styles = Js.Dict.empty () in
-  List.iter
+  Array.iter
     (fun x ->
       ignore (Js.Obj.assign (Obj.magic classes) (Obj.magic x.classes));
       ignore (Js.Obj.assign (Obj.magic styles) (Obj.magic x.styles)))

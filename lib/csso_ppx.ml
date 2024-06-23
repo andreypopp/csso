@@ -109,7 +109,7 @@ let compile_props ~loc es =
       match es with
       | [] -> [%expr Csso.empty]
       | [ e ] -> e
-      | _ -> [%expr Csso.merge [%e elist ~loc es]]]]
+      | _ -> [%expr Csso.merge [%e pexp_array ~loc es]]]]
 
 let extension_stri =
   let pattern =
@@ -161,66 +161,61 @@ let is_html_element = function
       true
   | _ -> false
 
-let extract_spec expr tag args =
-  let exception Nope in
-  try
-    let loc = expr.pexp_loc in
-    let () =
-      match tag.pexp_desc with
-      | Pexp_ident { txt = Lident name; _ } when is_html_element name -> ()
-      | _ -> raise Nope
-    in
-    let found = ref None in
-    let args =
-      List.concat_map
-        (function
-          | Labelled "csso", arg ->
-              found := Some arg;
-              [
-                (Optional "className", [%expr className]);
-                (Labelled "style", [%expr style]);
-              ]
-          | arg -> [ arg ])
-        args
-    in
-    match !found with
-    | None -> raise Nope
-    | Some arg ->
-        let pat = Ast_pattern.(elist __) in
-        Some
-          (match Ast_pattern.parse_res pat loc arg Fun.id with
-          | Error _ -> `Expr (arg, args)
-          | Ok es -> `Specs (es, args))
-  with Nope -> None
-
-let jsx_rewrite expr tag args =
-  let loc = expr.pexp_loc in
-  let make s args =
-    Some
-      [%expr
-        let s = [%e s] in
-        let className = Csso.to_class_name s in
-        let style = Csso.to_inline_style s in
-        [%e { expr with pexp_desc = Pexp_apply (tag, args) }]]
-  in
-  match extract_spec expr tag args with
-  | None -> None
-  | Some (`Expr (s, args)) -> make s args
-  | Some (`Specs (s, args)) ->
-      let s = compile_props ~loc s in
-      make s args
-
 let jsx_rewrite =
   object
     inherit Ast_traverse.map as super
 
     method! expression : expression -> expression =
       fun expr ->
+        let loc = expr.pexp_loc in
+        let make s tag args =
+          [%expr
+            let s = [%e s] in
+            let className = Csso.to_class_name s in
+            let style = Csso.to_inline_style s in
+            [%e { expr with pexp_desc = Pexp_apply (tag, args) }]]
+        in
+        let extract_spec expr tag args =
+          let exception Nope in
+          try
+            let loc = expr.pexp_loc in
+            let () =
+              match tag.pexp_desc with
+              | Pexp_ident { txt = Lident name; _ } when is_html_element name ->
+                  ()
+              | _ -> raise Nope
+            in
+            let found = ref None in
+            let args =
+              List.concat_map
+                (function
+                  | Labelled "csso", arg ->
+                      found := Some arg;
+                      [
+                        (Optional "className", [%expr className]);
+                        (Labelled "style", [%expr style]);
+                      ]
+                  | arg_label, arg -> [ (arg_label, super#expression arg) ])
+                args
+            in
+            match !found with
+            | None -> raise Nope
+            | Some arg ->
+                let pat = Ast_pattern.(elist __) in
+                Some
+                  (match Ast_pattern.parse_res pat loc arg Fun.id with
+                  | Error _ -> `Expr (arg, args)
+                  | Ok es -> `Specs (es, args))
+          with Nope -> None
+        in
         match expr.pexp_desc with
         | Pexp_apply (tag, args) when is_jsx expr -> (
-            match jsx_rewrite expr tag args with
-            | Some expr -> expr
-            | None -> expr)
+            match extract_spec expr tag args with
+            | None -> expr
+            | Some (`Expr (s, args)) -> make s tag args
+            | Some (`Specs (s, args)) ->
+                let s = compile_props ~loc s in
+                make s tag args)
         | _ -> super#expression expr
   end
 

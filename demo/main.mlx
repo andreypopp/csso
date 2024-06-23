@@ -9,6 +9,7 @@ let square n = [%csso
 module Page = struct
   let make () =
     <div csso=[ box; square 100 ]>
+      <h1 csso=[ square 50 ] />
       (React.string "hello!")
     </div>
     [@@react.component]
