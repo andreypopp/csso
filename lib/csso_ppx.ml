@@ -63,7 +63,9 @@ end = struct
 end
 
 module Specs : sig
-  val of_expression : loc:location -> expression -> Spec.t option
+  val of_expression :
+    loc:location -> expression -> (Spec.t, expression) Either.t
+
   val all : unit -> Spec.t list
 end = struct
   let found_specs : Spec.t list ref = ref []
@@ -75,46 +77,45 @@ end = struct
     | _ -> None
 
   let of_expression ~loc e =
-    let exception Not_a_prop in
     let spec =
-      try
-        let spec =
-          match e with
-          | [%expr flex_basis `auto] ->
-              Spec.static "flex-basis" (Csso_value.flex_basis `auto)
-          | [%expr flex_basis (`px [%e? v])] -> (
-              match match_int v with
-              | Some v ->
-                  Spec.static "flex-basis" (Csso_value.flex_basis (`px v))
-              | None ->
-                  Spec.dynamic "flex-basis"
-                    [%expr Csso_value.flex_basis (`px [%e v])])
-          | [%expr flex_basis [%e? v]] ->
-              Spec.dynamic "flex-basis" [%expr Csso_value.flex_basis [%e v]]
-          | [%expr width (`px [%e? v])] -> (
-              match match_int v with
-              | Some v -> Spec.static "width" (Csso_value.width (`px v))
-              | None ->
-                  Spec.dynamic "width" [%expr Csso_value.width (`px [%e v])])
-          | [%expr width [%e? v]] ->
-              Spec.dynamic "width" [%expr Csso_value.width [%e v]]
-          | [%expr height (`px [%e? v])] -> (
-              match match_int v with
-              | Some v -> Spec.static "height" (Csso_value.height (`px v))
-              | None ->
-                  Spec.dynamic "height" [%expr Csso_value.height (`px [%e v])])
-          | [%expr height [%e? v]] ->
-              Spec.dynamic "height" [%expr Csso_value.height [%e v]]
-          | _ -> raise Not_a_prop
-        in
-        Some spec
-      with Not_a_prop -> None
+      match e with
+      | [%expr flex_basis `auto] ->
+          Either.Left (Spec.static "flex-basis" (Csso_value.flex_basis `auto))
+      | [%expr flex_basis (`px [%e? v])] ->
+          Left
+            (match match_int v with
+            | Some v -> Spec.static "flex-basis" (Csso_value.flex_basis (`px v))
+            | None ->
+                Spec.dynamic "flex-basis"
+                  [%expr Csso_value.flex_basis (`px [%e v])])
+      | [%expr flex_basis [%e? v]] ->
+          Left (Spec.dynamic "flex-basis" [%expr Csso_value.flex_basis [%e v]])
+      | [%expr width (`px [%e? v])] ->
+          Left
+            (match match_int v with
+            | Some v -> Spec.static "width" (Csso_value.width (`px v))
+            | None -> Spec.dynamic "width" [%expr Csso_value.width (`px [%e v])])
+      | [%expr width [%e? v]] ->
+          Left (Spec.dynamic "width" [%expr Csso_value.width [%e v]])
+      | [%expr height (`px [%e? v])] ->
+          Left
+            (match match_int v with
+            | Some v -> Spec.static "height" (Csso_value.height (`px v))
+            | None ->
+                Spec.dynamic "height" [%expr Csso_value.height (`px [%e v])])
+      | [%expr height [%e? v]] ->
+          Left (Spec.dynamic "height" [%expr Csso_value.height [%e v]])
+      | [%expr use [%e? v]] -> Right v
+      | e ->
+          Location.raise_errorf ~loc:e.pexp_loc
+            "invalid style declaration, did you forget to use `use`?"
     in
-    match spec with
-    | None -> None
-    | Some spec ->
-        found_specs := spec :: !found_specs;
-        Some spec
+    let () =
+      match spec with
+      | Left spec -> found_specs := spec :: !found_specs
+      | Right _ -> ()
+    in
+    spec
 end
 
 let compile_props ~loc es =
@@ -123,8 +124,8 @@ let compile_props ~loc es =
     | [] -> List.rev (compile_specs specs acc)
     | e :: es -> (
         match Specs.of_expression ~loc e with
-        | Some spec -> go (spec :: specs) acc es
-        | None -> go [] (e :: compile_specs specs acc) es)
+        | Either.Left spec -> go (spec :: specs) acc es
+        | Right e -> go [] (e :: compile_specs specs acc) es)
   and compile_specs specs acc =
     match specs with [] -> acc | specs -> Spec.to_expression ~loc specs :: acc
   in

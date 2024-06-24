@@ -20,7 +20,7 @@ or directly in the `csso` attribute:
 ```ocaml
 module Page = struct
   let make () =
-    <div csso=[ box; square 100 ]>
+    <div csso=[ use box; use (square 100) ]>
       (React.string "hello!")
     </div>
     [@@react.component]
@@ -64,3 +64,9 @@ and the generated HTML for the React component:
   hello!
 </div>
 ```
+
+## Syntax
+
+Within the `[%csso ...]` extension, the following syntax is supported:
+- `property arg...` where `property` is a CSS property and `args...` is a set of arguments
+- `use expr` where `expr` is an arbitrary OCaml expression of type `Csso.style`
