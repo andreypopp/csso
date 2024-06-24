@@ -4,26 +4,25 @@ open Printf
 module Spec : sig
   type t
 
-  val static : string -> string -> t
-  val dynamic : string -> expression -> t
+  val make : string -> expression -> string option -> t
   val to_class_name : t -> string
   val to_css : t -> string
   val to_expression : loc:Location.t -> t list -> expression
 end = struct
-  type value = S of string | D of expression
-  type t = { name : string; value : value }
+  type t = { name : string; value : string option; expression : expression }
 
-  let static name value = { name; value = S value }
-  let dynamic name value = { name; value = D value }
+  let make name expression value = { name; value; expression }
 
-  let to_class_name { name; value } =
-    let value = match value with S v -> v | D _ -> "dynamic" in
+  let to_class_name { name; expression = _; value } =
+    let value = match value with Some v -> v | None -> "dynamic" in
     sprintf "%s-%s" name value
 
   let to_css spec =
     let class_name = to_class_name spec in
-    sprintf ".%s { %s: %s; }" class_name spec.name
-      (match spec.value with S v -> v | D _ -> "var(--" ^ spec.name ^ ")")
+    sprintf ".%s { %s; }" class_name
+      (match spec.value with
+      | Some v -> sprintf "%s: %s" spec.name v
+      | None -> sprintf "%s: var(--%s)" spec.name spec.name)
 
   let to_expression ~loc = function
     | [] -> [%expr Csso.empty]
@@ -39,10 +38,11 @@ end = struct
               let styles =
                 let v =
                   match spec.value with
-                  | S _ -> [%expr Js.Undefined.empty]
-                  | D v -> [%expr Js.Undefined.return [%e v]]
+                  | Some _ -> [%expr Js.Undefined.empty]
+                  | None -> [%expr Js.Undefined.return [%e spec.expression]]
                 in
-                ({ txt = Lident ("--" ^ spec.name); loc }, [%expr [%e v]])
+                ( { txt = Lident (sprintf "--%s" spec.name); loc },
+                  [%expr [%e v]] )
               in
               ((class_name, classes), styles))
             specs
@@ -62,6 +62,125 @@ end = struct
               }]]
 end
 
+module Arg_spec : sig
+  [@@@ocaml.warning "-32"]
+
+  type _ t
+
+  val bool : bool t
+  val int : int t
+  val float : float t
+  val string : string t
+
+  type _ tuple
+
+  val variant : (string * 'x tuple) list -> 'x t
+  val case0 : string -> string * unit tuple
+  val case1 : string -> 'x t -> string * 'x tuple
+  val case2 : string -> 'x t -> 'y t -> string * ('x * 'y) tuple
+  val ( --> ) : string * 'x tuple -> ('x -> 'y) -> string * 'y tuple
+
+  type _ a
+
+  val return : 'x -> 'x a
+  val ( $ ) : ('x -> 'y) a -> 'x t -> 'y a
+
+  type args = (arg_label * expression) list
+
+  val eval : 'x a -> args -> 'x option
+end = struct
+  type _ t =
+    | I : int t
+    | F : float t
+    | S : string t
+    | B : bool t
+    | V : (string * 'x tuple) list -> 'x t
+
+  and _ tuple =
+    | T0 : unit tuple
+    | T1 : 'x t -> 'x tuple
+    | T2 : 'x t * 'y t -> ('x * 'y) tuple
+    | TF : 'x tuple * ('x -> 'y) -> 'y tuple
+
+  let int = I
+  let float = F
+  let string = S
+  let bool = B
+  let variant cases = V cases
+  let case0 l = (l, T0)
+  let case1 l t = (l, T1 t)
+  let case2 l x y = (l, T2 (x, y))
+  let ( --> ) (l, x) y = (l, TF (x, y))
+
+  (** argument specification *)
+  type _ a = R : 'a -> 'a a | A : ('a -> 'b) a * 'a t -> 'b a
+
+  let return v = R v
+  let ( $ ) f t = A (f, t)
+
+  type args = (arg_label * expression) list
+
+  let ( let* ) = Option.bind
+
+  let rec parse_expression : type x. x t -> expression -> x option =
+   fun t e ->
+    match (t, e) with
+    | I, { pexp_desc = Pexp_constant (Pconst_integer (v, _)); _ } ->
+        Some (int_of_string v)
+    | F, { pexp_desc = Pexp_constant (Pconst_float (v, _)); _ } ->
+        Some (float_of_string v)
+    | S, { pexp_desc = Pexp_constant (Pconst_string (v, _, _)); _ } -> Some v
+    | B, { pexp_desc = Pexp_construct ({ txt = Lident "true"; _ }, None); _ } ->
+        Some true
+    | B, { pexp_desc = Pexp_construct ({ txt = Lident "false"; _ }, None); _ }
+      ->
+        Some true
+    | V cases, { pexp_desc = Pexp_variant (l', payload); _ } -> (
+        let rec eval_tuple : type x. x tuple -> expression option -> x option =
+         fun t e ->
+          match (t, e) with
+          | T0, None -> Some ()
+          | T1 t, Some x' ->
+              let* x = parse_expression t x' in
+              Some x
+          | T2 (x, y), Some { pexp_desc = Pexp_tuple [ x'; y' ]; _ } ->
+              let* x = parse_expression x x' in
+              let* y = parse_expression y y' in
+              Some (x, y)
+          | TF (t, f), x ->
+              let* x = eval_tuple t x in
+              Some (f x)
+          | _, _ -> None
+        in
+        match List.assoc_opt l' cases with
+        | None -> None
+        | Some t -> eval_tuple t payload)
+    | _, _ -> None
+
+  let parse_arg args label : args * expression option =
+    let rec go seen args =
+      match (args, label) with
+      | [], _ -> (List.rev seen, None)
+      | (Nolabel, e) :: args, None -> (List.rev_append seen args, Some e)
+      | ((Labelled l' | Optional l'), e) :: args, Some l when String.equal l l'
+        ->
+          (List.rev_append seen args, Some e)
+      | arg :: args, _ -> go (arg :: seen) args
+    in
+    go [] args
+
+  let rec eval : type x. x a -> args -> x option =
+   fun spec args ->
+    match spec with
+    | R x -> Some x
+    | A (f, t) ->
+        let args, e = parse_arg args None in
+        let* e = e in
+        let* x = parse_expression t e in
+        let* f = eval f args in
+        Some (f x)
+end
+
 module Specs : sig
   val of_expression :
     loc:location -> expression -> (Spec.t, expression) Either.t
@@ -71,44 +190,67 @@ end = struct
   let found_specs : Spec.t list ref = ref []
   let all () = !found_specs
 
-  let match_int e =
-    match e.Ppxlib.pexp_desc with
-    | Pexp_constant (Pconst_integer (v, _)) -> Some (int_of_string v)
-    | _ -> None
+  let specs =
+    let px () = Arg_spec.(case1 "px" int --> fun x -> `px x) in
+    let auto () = Arg_spec.(case0 "auto" --> fun () -> `auto) in
+    let loc = Location.none in
+    [
+      ( [%expr Csso_value.flex_basis],
+        Arg_spec.(return Csso_value.flex_basis $ variant [ auto (); px () ]) );
+      ( [%expr Csso_value.width],
+        Arg_spec.(return Csso_value.width $ variant [ px () ]) );
+      ( [%expr Csso_value.height],
+        Arg_spec.(return Csso_value.height $ variant [ px () ]) );
+    ]
+
+  module String_map = Map.Make (String)
+
+  let specs =
+    List.fold_left
+      (fun acc (e, v) ->
+        let k =
+          match e with
+          | {
+           pexp_desc = Pexp_ident { txt = Ldot (Lident "Csso_value", k); _ };
+           _;
+          } ->
+              k
+          | _ -> assert false
+        in
+        String_map.add k (e, v) acc)
+      String_map.empty specs
 
   let of_expression ~loc e =
+    let open Ast_builder.Default in
     let spec =
       match e with
-      | [%expr flex_basis `auto] ->
-          Either.Left (Spec.static "flex-basis" (Csso_value.flex_basis `auto))
-      | [%expr flex_basis (`px [%e? v])] ->
-          Left
-            (match match_int v with
-            | Some v -> Spec.static "flex-basis" (Csso_value.flex_basis (`px v))
-            | None ->
-                Spec.dynamic "flex-basis"
-                  [%expr Csso_value.flex_basis (`px [%e v])])
-      | [%expr flex_basis [%e? v]] ->
-          Left (Spec.dynamic "flex-basis" [%expr Csso_value.flex_basis [%e v]])
-      | [%expr width (`px [%e? v])] ->
-          Left
-            (match match_int v with
-            | Some v -> Spec.static "width" (Csso_value.width (`px v))
-            | None -> Spec.dynamic "width" [%expr Csso_value.width (`px [%e v])])
-      | [%expr width [%e? v]] ->
-          Left (Spec.dynamic "width" [%expr Csso_value.width [%e v]])
-      | [%expr height (`px [%e? v])] ->
-          Left
-            (match match_int v with
-            | Some v -> Spec.static "height" (Csso_value.height (`px v))
-            | None ->
-                Spec.dynamic "height" [%expr Csso_value.height (`px [%e v])])
-      | [%expr height [%e? v]] ->
-          Left (Spec.dynamic "height" [%expr Csso_value.height [%e v]])
-      | [%expr use [%e? v]] -> Right v
-      | e ->
-          Location.raise_errorf ~loc:e.pexp_loc
-            "invalid style declaration, did you forget to use `use`?"
+      | [%expr use [%e? v]] -> Either.Right v
+      | e -> (
+          let v =
+            let ( let* ) = Option.bind in
+            let* k, args =
+              match e with
+              | {
+               pexp_desc =
+                 Pexp_apply
+                   ({ pexp_desc = Pexp_ident { txt = Lident k; _ }; _ }, args);
+               _;
+              } ->
+                  Some (k, args)
+              | _ -> None
+            in
+            let* f, spec = String_map.find_opt k specs in
+            let k = String.map (function '_' -> '-' | c -> c) k in
+            let e = pexp_apply ~loc f args in
+            match Arg_spec.eval spec args with
+            | None -> Some (Spec.make k e None)
+            | Some v -> Some (Spec.make k e (Some v))
+          in
+          match v with
+          | Some v -> Left v
+          | None ->
+              Location.raise_errorf ~loc:e.pexp_loc
+                "invalid style declaration, did you forget to use `use`?")
     in
     let () =
       match spec with
