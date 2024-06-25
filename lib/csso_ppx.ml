@@ -264,8 +264,6 @@ end = struct
         Arg_spec.(css_func Csso_lang.height $ variant [ px () ]) );
     ]
 
-  module String_map = Map.Make (String)
-
   let specs =
     List.fold_left
       (fun acc (e, p, v) ->
