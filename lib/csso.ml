@@ -31,5 +31,3 @@ let merge xs =
       Some (Js.Array.join ~sep:" " values)
     in
     { classes; style; className }
-
-include Csso_value

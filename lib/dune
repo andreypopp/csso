@@ -6,7 +6,7 @@
   (pps ppxlib.metaquot))
  (kind ppx_rewriter)
  (ppx_runtime_libraries csso)
- (libraries ppxlib csso_value))
+ (libraries ppxlib csso_lang))
 
 (library
  (name csso)
@@ -17,13 +17,13 @@
   (pps melange.ppx))
  (libraries
   reason-react
-  (re_export csso_value)))
+  (re_export csso_lang)))
 
 (library
- (name csso_value)
+ (name csso_lang)
  (public_name csso.value)
  (modes :standard melange)
- (modules csso_value))
+ (modules csso_lang))
 
 (executable
  (name csso_test)

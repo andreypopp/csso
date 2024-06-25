@@ -1,57 +1,104 @@
 open Ppxlib
 open Printf
+module String_map = Map.Make (String)
 
 module Spec : sig
   type t
 
-  val make : string -> expression -> string option -> t
-  val to_class_name : t -> string
-  val to_css : t -> string
-  val to_expression : loc:Location.t -> t list -> expression
+  val css : label array -> string array -> t
+  (** statically known stylesheet *)
+
+  val dyn : label array -> expression -> t
+  (** dynamically computed stylesheet *)
+
+  val merge : t list -> t
+  (** merge multiple stylesheets *)
+
+  val to_class_name : t -> string list
+  val to_css : t -> string list
+  val to_expression : loc:Location.t -> t -> expression
 end = struct
-  type t = { name : string; value : string option; expression : expression }
+  type t = value String_map.t
 
-  let make name expression value = { name; value; expression }
+  and value =
+    | Css of string (* a statically known css value *)
+    | Dyn of expression * label * int
+  (* a dynamic css value, as an expression which evaluates to an array and an
+     index into the array *)
 
-  let to_class_name { name; expression = _; value } =
-    let value = match value with Some v -> v | None -> "dynamic" in
-    sprintf "%s-%s" name value
+  let css keys vals : t =
+    String_map.of_seq
+      (Array.to_seq keys |> Seq.mapi (fun i k -> (k, Css vals.(i))))
 
-  let to_css spec =
-    let class_name = to_class_name spec in
-    sprintf ".%s { %s; }" class_name
-      (match spec.value with
-      | Some v -> sprintf "%s: %s" spec.name v
-      | None -> sprintf "%s: var(--%s)" spec.name spec.name)
+  let dyn keys expr : t =
+    let name = gen_symbol ~prefix:"css" () in
+    String_map.of_seq
+      (Array.to_seq keys |> Seq.mapi (fun i k -> (k, Dyn (expr, name, i))))
 
-  let to_expression ~loc = function
-    | [] -> [%expr Csso.empty]
-    | specs ->
-        let open Ast_builder.Default in
-        let classes, styles =
-          List.map
-            (fun spec ->
-              let class_name = to_class_name spec in
-              let classes =
-                ({ txt = Lident spec.name; loc }, estring ~loc class_name)
-              in
-              let styles =
-                let v =
-                  match spec.value with
-                  | Some _ -> [%expr Js.Undefined.empty]
-                  | None -> [%expr Js.Undefined.return [%e spec.expression]]
-                in
-                ( { txt = Lident (sprintf "--%s" spec.name); loc },
-                  [%expr [%e v]] )
-              in
-              ((class_name, classes), styles))
-            specs
-          |> List.split
+  let merge a b =
+    String_map.merge
+      (fun _ a b ->
+        match (a, b) with
+        | Some _, Some v | Some v, None | None, Some v -> Some v
+        | None, None -> None)
+      a b
+
+  let merge xs = List.fold_left merge String_map.empty xs
+  let css_to_class_name = sprintf "%s-%s"
+  let dyn_to_class_name = sprintf "%s-dyn"
+
+  let to_class_name v =
+    String_map.to_seq v
+    |> Seq.map (fun (n, v) ->
+           match v with
+           | Css v -> css_to_class_name n v
+           | Dyn _ -> dyn_to_class_name n)
+    |> List.of_seq
+
+  let to_css v =
+    String_map.to_seq v
+    |> Seq.map (fun (n, v) ->
+           match v with
+           | Css v -> sprintf ".%s { %s: %s; }" (css_to_class_name n v) n v
+           | Dyn _ -> sprintf ".%s { %s: var(--%s); }" (dyn_to_class_name n) n n)
+    |> List.of_seq
+
+  let to_expression ~loc v =
+    let open Ast_builder.Default in
+    if String_map.is_empty v then [%expr Csso.empty]
+    else
+      let used = ref String_map.empty in
+      let classes, styles =
+        let style_name n = { txt = Lident (sprintf "--%s" n); loc } in
+        let class_info n class_name =
+          let classes = ({ txt = Lident n; loc }, estring ~loc class_name) in
+          (class_name, classes)
         in
-        let class_names, classes = List.split classes in
-        let classes = pexp_record ~loc classes None in
-        let styles = pexp_record ~loc styles None in
-        let className = estring ~loc (String.concat " " class_names) in
+        String_map.to_seq v
+        |> Seq.map (fun (n, v) ->
+               match v with
+               | Css v ->
+                   let class_name = css_to_class_name n v in
+                   let styles = (style_name n, [%expr Js.Undefined.empty]) in
+                   (class_info n class_name, styles)
+               | Dyn (e, en, idx) ->
+                   let class_name = dyn_to_class_name n in
+                   used := String_map.add en e !used;
+                   let styles =
+                     ( style_name n,
+                       [%expr
+                         Js.Undefined.return
+                           (Array.get [%e evar ~loc:e.pexp_loc en]
+                              [%e eint ~loc idx])] )
+                   in
+                   (class_info n class_name, styles))
+        |> List.of_seq |> List.split
+      in
+      let class_names, classes = List.split classes in
+      let classes = pexp_record ~loc classes None in
+      let styles = pexp_record ~loc styles None in
+      let className = estring ~loc (String.concat " " class_names) in
+      let expr =
         [%expr
           Csso.make
             [%mel.obj
@@ -60,6 +107,13 @@ end = struct
                 style = [%mel.obj [%e styles]];
                 className = Some [%e className];
               }]]
+      in
+      String_map.fold
+        (fun k v expr ->
+          [%expr
+            let [%p pvar ~loc k] = [%e v] in
+            [%e expr]])
+        !used expr
 end
 
 module Arg_spec : sig
@@ -190,34 +244,41 @@ end = struct
   let found_specs : Spec.t list ref = ref []
   let all () = !found_specs
 
-  let specs =
+  let css_func (keys, f) =
+    let f x = Spec.css keys (f x) in
+    Arg_spec.return f
+
+  let specs : (expression * string array * Spec.t Arg_spec.a) list =
     let px () = Arg_spec.(case1 "px" int --> fun x -> `px x) in
     let auto () = Arg_spec.(case0 "auto" --> fun () -> `auto) in
     let loc = Location.none in
     [
-      ( [%expr Csso_value.flex_basis],
-        Arg_spec.(return Csso_value.flex_basis $ variant [ auto (); px () ]) );
-      ( [%expr Csso_value.width],
-        Arg_spec.(return Csso_value.width $ variant [ px () ]) );
-      ( [%expr Csso_value.height],
-        Arg_spec.(return Csso_value.height $ variant [ px () ]) );
+      ( [%expr Csso_lang.flex_basis],
+        fst Csso_lang.flex_basis,
+        Arg_spec.(css_func Csso_lang.flex_basis $ variant [ auto (); px () ]) );
+      ( [%expr Csso_lang.width],
+        fst Csso_lang.width,
+        Arg_spec.(css_func Csso_lang.width $ variant [ px () ]) );
+      ( [%expr Csso_lang.height],
+        fst Csso_lang.height,
+        Arg_spec.(css_func Csso_lang.height $ variant [ px () ]) );
     ]
 
   module String_map = Map.Make (String)
 
   let specs =
     List.fold_left
-      (fun acc (e, v) ->
+      (fun acc (e, p, v) ->
         let k =
           match e with
           | {
-           pexp_desc = Pexp_ident { txt = Ldot (Lident "Csso_value", k); _ };
+           pexp_desc = Pexp_ident { txt = Ldot (Lident "Csso_lang", k); _ };
            _;
           } ->
               k
           | _ -> assert false
         in
-        String_map.add k (e, v) acc)
+        String_map.add k (e, p, v) acc)
       String_map.empty specs
 
   let of_expression ~loc e =
@@ -239,12 +300,11 @@ end = struct
                   Some (k, args)
               | _ -> None
             in
-            let* f, spec = String_map.find_opt k specs in
-            let k = String.map (function '_' -> '-' | c -> c) k in
-            let e = pexp_apply ~loc f args in
+            let* f, props, spec = String_map.find_opt k specs in
+            let e = pexp_apply ~loc [%expr snd [%e f]] args in
             match Arg_spec.eval spec args with
-            | None -> Some (Spec.make k e None)
-            | Some v -> Some (Spec.make k e (Some v))
+            | None -> Some (Spec.dyn props e)
+            | Some spec -> Some spec
           in
           match v with
           | Some v -> Left v
@@ -269,11 +329,14 @@ let compile_props ~loc es =
         | Either.Left spec -> go (spec :: specs) acc es
         | Right e -> go [] (e :: compile_specs specs acc) es)
   and compile_specs specs acc =
-    match specs with [] -> acc | specs -> Spec.to_expression ~loc specs :: acc
+    match specs with
+    | [] -> acc
+    (*| specs -> Spec.to_expression ~loc (Spec.merge specs) :: acc*)
+    | specs -> Spec.to_expression ~loc (Spec.merge specs) :: acc
   in
   let es = go [] [] es in
   [%expr
-    let open Csso_value in
+    let open Csso_lang in
     let _ = height in
     [%e
       match es with
@@ -395,7 +458,9 @@ let impl (str : structure) =
   List.fold_left
     (fun str spec ->
       let name = Spec.to_class_name spec in
+      let name = String.concat " " name in
       let css = Spec.to_css spec in
+      let css = String.concat "\n" css in
       [%stri [@@@CSS [%e estring ~loc name], [%e estring ~loc css]]] :: str)
     str (Specs.all ())
 

@@ -1,4 +1,4 @@
 .flex-basis-auto { flex-basis: auto; }
-.height-dynamic { height: var(--height); }
+.height-dyn { height: var(--height); }
 .width-100px { width: 100px; }
-.width-dynamic { width: var(--width); }
+.width-dyn { width: var(--width); }
